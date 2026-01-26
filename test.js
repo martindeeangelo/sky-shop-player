@@ -1,1 +1,4 @@
-console.log('✅ player boot', location.pathname);
+document.addEventListener('DOMContentLoaded', () => {
+  alert('JS DZIAŁA (external)');
+  console.log('✅ test.js LOADED');
+});
