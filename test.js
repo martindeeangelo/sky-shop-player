@@ -5,42 +5,26 @@
   const WRAP_ID = 'ss-sticky-player';
 
   // resume state
-  const STORE_KEY = 'ss_player_state_v1';
+  const STORE_KEY = 'ss_player_state_v2';
   const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // 30 min
 
-  // nie dubluj sticky
   if (document.getElementById(WRAP_ID)) return;
 
   /* ================= HELPERS ================= */
 
   const deDia = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-  // slugowanie: &, nawiasy, apostrofy, _www, końcowe -.mp3
   const slugFromTitle = (title) => {
     let s = deDia(title);
-
-    // usuń prefixy
     s = s.replace(/^\s*(audio|mp3|utw[oó]r|preview)\s+/i, '');
-
-    // "&" -> spacja (NIE "and")
     s = s.replace(/&/g, ' ');
-
-    // usuń nawiasy i apostrofy
     s = s.replace(/[()']/g, '');
-
-    // zachowaj "_" (dla _www), reszta -> -
     s = s.replace(/[^A-Za-z0-9_]+/g, '-');
-
-    // wymuś dokładnie "-_www"
     s = s.replace(/(^|[^-])_www/ig, '$1-_www');
-
-    // porządki
     s = s.replace(/-+/g, '-').replace(/^-|-$/g, '');
-
     return s;
   };
 
-  // sprawdzanie istnienia mp3 przez Audio (bez HEAD)
   const audioUrlExists = (url, timeoutMs = 2500) =>
     new Promise((resolve) => {
       const a = new Audio();
@@ -66,12 +50,10 @@
 
   const resolveMp3Url = async (productTitle) => {
     const s = slugFromTitle(productTitle);
-
     const candidates = [
       `${AUDIO_BASE}${s}.mp3`,
       `${AUDIO_BASE}${s}-.mp3`,
     ];
-
     for (const url of candidates) {
       // eslint-disable-next-line no-await-in-loop
       if (await audioUrlExists(url)) return url;
@@ -129,7 +111,7 @@
 }
 #${WRAP_ID} #ss-range{flex:1;}
 #${WRAP_ID} #ss-time{
-  width:84px;
+  width:110px;
   text-align:right;
   color:#ccc;
   font-size:12px;
@@ -185,10 +167,12 @@
       const p = audio.play();
       btnPlay.textContent = '⏸';
       if (currentBtn) currentBtn.textContent = '⏸';
-      if (p && typeof p.catch === 'function') p.catch(() => {
-        btnPlay.textContent = '▶';
-        if (currentBtn) currentBtn.textContent = '▶';
-      });
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          btnPlay.textContent = '▶';
+          if (currentBtn) currentBtn.textContent = '▶';
+        });
+      }
     } else {
       audio.pause();
       btnPlay.textContent = '▶';
@@ -255,7 +239,9 @@
     if (!st) return;
 
     audio.src = st.src;
-    titleElSticky.textContent = st.title || '—';
+    const baseTitle = st.title || '—';
+    titleElSticky.textContent = baseTitle;
+
     btnPlay.textContent = st.playing ? '⏸' : '▶';
 
     const seekTo = Math.max(0, Number(st.t || 0));
@@ -265,9 +251,14 @@
 
       if (st.playing) {
         const p = audio.play();
-        if (p && typeof p.catch === 'function') p.catch(() => {
-          btnPlay.textContent = '▶'; // autoplay zablokowany -> pauza
-        });
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            // autoplay zablokowany – powiedz userowi co zrobić
+            btnPlay.textContent = '▶';
+            titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować)`;
+            saveState(false);
+          });
+        }
       }
     };
 
@@ -275,21 +266,17 @@
     else audio.addEventListener('loadedmetadata', doSeekAndMaybePlay, { once: true });
   };
 
-  // zapis tuż przed nawigacją (klik w link produktu / kafelek)
+  // zapis tuż przed nawigacją (klik w link produktu)
   const hookNavigationSave = () => {
     const handler = (e) => {
-      // jeśli nie ma src – nic
       if (!audio.src) return;
 
-      // klik w link <a> prowadzący gdzieś
       const a = e.target && e.target.closest ? e.target.closest('a') : null;
       if (!a) return;
 
-      // pomiń linki typu javascript:, #, mailto:
       const href = (a.getAttribute('href') || '').trim();
       if (!href || href === '#' || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
 
-      // tylko lewy klik bez modifierów
       if (e.button !== 0) return;
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 
@@ -317,11 +304,9 @@
   };
 
   const pickMainTitleEl = (box) => {
-    // 1) link tytułu (zwykle ten właściwy)
     const a = box.querySelector('.product-name a, .product-name-container a');
     if (a && a.textContent.trim()) return a.closest('.product-name') || a;
 
-    // 2) pierwszy sensowny, widoczny
     const names = Array.from(
       box.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name')
     );
@@ -344,7 +329,6 @@
       const box = getProductBox(cand);
       if (!box) return;
 
-      // 1 produkt = 1 play
       if (box.dataset.ssHasPlay === '1') return;
 
       const titleEl = pickMainTitleEl(box);
@@ -353,7 +337,6 @@
       const title = (titleEl.textContent || '').trim();
       if (!title) return;
 
-      // jeśli już jest playline w boxie
       if (box.querySelector('.ss-playline')) {
         box.dataset.ssHasPlay = '1';
         return;
@@ -371,7 +354,6 @@
         e.preventDefault();
         e.stopPropagation();
 
-        // pauza, jeśli to ten sam
         if (currentBtn === b && !audio.paused) {
           audio.pause();
           btnPlay.textContent = '▶';
@@ -410,9 +392,9 @@
 
         if (p && typeof p.catch === 'function') {
           p.catch(() => {
-            // autoplay zablokowany – ustaw pauzę
             btnPlay.textContent = '▶';
             b.textContent = '▶';
+            titleElSticky.textContent = `${title} (kliknij ▶ aby kontynuować)`;
             saveState(false);
           });
         }
@@ -441,11 +423,8 @@
     });
     obs.observe(document.body, { childList: true, subtree: true });
 
-    // resume po wejściu na kartę produktu / inną podstronę
-    restoreState();
-
-    // zapis przy przejściu linkiem
     hookNavigationSave();
+    restoreState();
   };
 
   if (document.readyState === 'loading') {
