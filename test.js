@@ -1,467 +1,385 @@
-/* ===== SKY-SHOP: MP3 PER PRODUKT + STICKY + 1x PLAY PER PRODUKT + RESUME MIĘDZY PODSTRONAMI ===== */
-(() => {
-  const AUDIO_BASE = 'https://dv202.mysky-shop.pl/upload/dv202/audio/';
-  const STYLE_ID = 'ss-player-style';
-  const WRAP_ID = 'ss-sticky-player';
+(function () {
+  // ====== GUARD ======
+  if (window.__SS_PLAYER_LOADED__) return;
+  window.__SS_PLAYER_LOADED__ = true;
 
-  // resume state
-  const STORE_KEY = 'ss_player_state_v3';
-  const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // 30 min
+  // ====== CONFIG ======
+  const SELECTOR_TILE = 'figure.product-tile';
+  const TITLE_SELECTORS = ['.product-name', '.product-name-container', '.product-title', 'figcaption', 'h3', 'h2'];
+  const PLAYLINE_WIDTH_PX = 160; // <- długość paska przy produkcie (na prawo od ▶)
+  const STICKY_LINE_WIDTH_PX = 260; // <- długość paska w sticky playerze
 
-  if (document.getElementById(WRAP_ID)) return;
+  // ====== STATE ======
+  const audios = [];
+  let currentAudio = null;
 
-  /* ================= HELPERS ================= */
+  // ====== HELPERS ======
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  const deDia = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-  const slugFromTitle = (title) => {
-    let s = deDia(title);
-    s = s.replace(/^\s*(audio|mp3|utw[oó]r|preview)\s+/i, '');
-    s = s.replace(/&/g, ' ');
-    s = s.replace(/[()']/g, '');
-    s = s.replace(/[^A-Za-z0-9_]+/g, '-');
-    s = s.replace(/(^|[^-])_www/ig, '$1-_www');
-    s = s.replace(/-+/g, '-').replace(/^-|-$/g, '');
-    return s;
-  };
-
-  const audioUrlExists = (url, timeoutMs = 2500) =>
-    new Promise((resolve) => {
-      const a = new Audio();
-      let done = false;
-
-      const finish = (ok) => {
-        if (done) return;
-        done = true;
-        try { a.pause(); } catch (_) {}
-        a.src = '';
-        resolve(ok);
-      };
-
-      const t = setTimeout(() => finish(false), timeoutMs);
-
-      a.addEventListener('loadedmetadata', () => { clearTimeout(t); finish(true); }, { once: true });
-      a.addEventListener('canplay', () => { clearTimeout(t); finish(true); }, { once: true });
-      a.addEventListener('error', () => { clearTimeout(t); finish(false); }, { once: true });
-
-      a.preload = 'metadata';
-      a.src = url;
-    });
-
-  const resolveMp3Url = async (productTitle) => {
-    const s = slugFromTitle(productTitle);
-    const candidates = [
-      `${AUDIO_BASE}${s}.mp3`,
-      `${AUDIO_BASE}${s}-.mp3`,
-    ];
-    for (const url of candidates) {
-      // eslint-disable-next-line no-await-in-loop
-      if (await audioUrlExists(url)) return url;
+  function findTitleContainer(tile) {
+    for (const sel of TITLE_SELECTORS) {
+      const el = $(sel, tile);
+      if (el) return el;
     }
-    return null;
-  };
+    return tile; // fallback
+  }
 
-  const fmt = (sec) => {
-    if (!isFinite(sec)) return '0:00';
+  function getMp3Url(tile) {
+    // 1) data-mp3
+    const data = tile.getAttribute('data-mp3');
+    if (data && data.trim()) return data.trim();
+
+    // 2) link ending with .mp3
+    const a = $('a[href$=".mp3"]', tile);
+    if (a && a.href) return a.href;
+
+    return null;
+  }
+
+  function clamp(n, a, b) {
+    return Math.max(a, Math.min(b, n));
+  }
+
+  function percent(audio) {
+    if (!audio || !isFinite(audio.duration) || audio.duration <= 0) return 0;
+    return clamp((audio.currentTime / audio.duration) * 100, 0, 100);
+  }
+
+  function formatTime(sec) {
+    if (!isFinite(sec) || sec < 0) sec = 0;
     const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  };
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
 
-  const safeJsonParse = (raw) => {
-    try { return JSON.parse(raw); } catch (_) { return null; }
-  };
+  // ====== CSS INJECT ======
+  const style = document.createElement('style');
+  style.textContent = `
+    .ss-play-wrap{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      vertical-align:middle;
+    }
+    .ss-play-btn{
+      cursor:pointer;
+      border:0;
+      background:transparent;
+      font-size:16px;
+      line-height:1;
+      padding:0;
+    }
+    .ss-playline{
+      width:${PLAYLINE_WIDTH_PX}px;
+      height:6px;
+      background:rgba(0,0,0,.18);
+      border-radius:999px;
+      position:relative;
+      overflow:hidden;
+      cursor:pointer;
+      flex:0 0 auto;
+    }
+    .ss-playline-fill{
+      position:absolute;
+      left:0; top:0; bottom:0;
+      width:0%;
+      background:#000;
+    }
+    .ss-playline-knob{
+      position:absolute;
+      top:50%;
+      transform:translate(-50%,-50%);
+      width:10px; height:10px;
+      background:#000;
+      border-radius:50%;
+      left:0%;
+      pointer-events:none;
+      opacity:.9;
+    }
 
-  /* ================= CSS ================= */
-
-  const injectCss = () => {
-    if (document.getElementById(STYLE_ID)) return;
-    const st = document.createElement('style');
-    st.id = STYLE_ID;
-    st.textContent = `
-#${WRAP_ID}{
-  position:fixed;
-  left:12px; right:12px; bottom:12px;
-  z-index:99999;
-  background:rgba(10,10,10,.92);
-  border:1px solid rgba(255,255,255,.12);
-  border-radius:14px;
-  padding:10px 12px;
-  backdrop-filter:blur(8px);
-}
-#${WRAP_ID} .ss-row{
-  display:flex;
-  align-items:center;
-  gap:10px;
-}
-#${WRAP_ID} #ss-play{
-  width:46px; height:46px;
-  background:#000; color:#fff;
-  border:none; border-radius:10px;
-  cursor:pointer;
-}
-#${WRAP_ID} .ss-meta{flex:1; min-width:0;}
-#${WRAP_ID} #ss-title{
-  color:#fff; font-weight:600; font-size:13px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  margin-bottom:6px;
-}
-#${WRAP_ID} .ss-bar{
-  display:flex; gap:10px; align-items:center;
-}
-#${WRAP_ID} #ss-range{flex:1;}
-#${WRAP_ID} #ss-time{
-  width:120px;
-  text-align:right;
-  color:#ccc;
-  font-size:12px;
-  white-space:nowrap;
-}
-.ss-playline{margin-top:6px;}
-.ss-inline-play{
-  width:34px; height:28px;
-  border-radius:8px;
-  border:1px solid rgba(0,0,0,.2);
-  background:#000; color:#fff;
-  font-size:12px;
-  cursor:pointer;
-}
-`;
-    document.head.appendChild(st);
-  };
-
-  /* ================= STICKY PLAYER ================= */
-
-  let currentBtn = null;
-  const audio = new Audio();
-  audio.preload = 'none';
-
-  const wrap = document.createElement('div');
-  wrap.id = WRAP_ID;
-  wrap.innerHTML = `
-    <div class="ss-row">
-      <button id="ss-play" type="button">▶</button>
-      <div class="ss-meta">
-        <div id="ss-title">—</div>
-        <div class="ss-bar">
-          <input id="ss-range" type="range" min="0" max="1000" value="0">
-          <span id="ss-time">0:00 / 0:00</span>
-        </div>
-      </div>
-    </div>
+    /* sticky */
+    #ss-sticky-player{
+      position:fixed;
+      left:0; right:0; bottom:0;
+      height:58px;
+      background:#111;
+      color:#fff;
+      display:none;
+      align-items:center;
+      padding:0 12px;
+      z-index:999999;
+      gap:12px;
+      font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      box-shadow:0 -8px 24px rgba(0,0,0,.25);
+    }
+    #ss-sticky-player button{
+      cursor:pointer;
+      border:0;
+      background:transparent;
+      color:#fff;
+      font-size:20px;
+      padding:0;
+      line-height:1;
+    }
+    #ss-sticky-title{
+      flex:1;
+      font-size:13px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      opacity:.95;
+    }
+    #ss-sticky-time{
+      font-size:12px;
+      opacity:.8;
+      min-width:80px;
+      text-align:right;
+    }
+    #ss-sticky-line{
+      width:${STICKY_LINE_WIDTH_PX}px;
+      height:6px;
+      background:rgba(255,255,255,.18);
+      border-radius:999px;
+      position:relative;
+      overflow:hidden;
+      cursor:pointer;
+      flex:0 0 auto;
+    }
+    #ss-sticky-line .ss-playline-fill{ background:#fff; }
+    #ss-sticky-line .ss-playline-knob{ background:#fff; }
   `;
-  document.body.appendChild(wrap);
+  document.head.appendChild(style);
 
-  const btnPlay = wrap.querySelector('#ss-play');
-  const titleElSticky = wrap.querySelector('#ss-title');
-  const range = wrap.querySelector('#ss-range');
-  const timeEl = wrap.querySelector('#ss-time');
+  // ====== STICKY UI ======
+  const sticky = document.createElement('div');
+  sticky.id = 'ss-sticky-player';
 
-  const resetInlineButtons = () => {
-    document.querySelectorAll('.ss-inline-play').forEach((b) => (b.textContent = '▶'));
-  };
+  const stickyBtn = document.createElement('button');
+  stickyBtn.id = 'ss-sticky-btn';
+  stickyBtn.textContent = '⏸';
 
-  /* ================= RESUME (localStorage) ================= */
+  const stickyTitle = document.createElement('div');
+  stickyTitle.id = 'ss-sticky-title';
+  stickyTitle.textContent = '';
 
-  // IMPORTANT: zapisujemy też wasPlaying (czy grało zanim user wszedł w produkt)
-  const saveState = (playing, wasPlaying = null) => {
-    try {
-      const prevRaw = localStorage.getItem(STORE_KEY);
-      const prev = prevRaw ? safeJsonParse(prevRaw) : null;
+  const stickyLine = document.createElement('div');
+  stickyLine.id = 'ss-sticky-line';
 
-      localStorage.setItem(STORE_KEY, JSON.stringify({
-        src: audio.src || '',
-        title: (titleElSticky.textContent || '').trim(),
-        t: audio.currentTime || 0,
-        playing: !!playing,
-        wasPlaying: wasPlaying === null ? !!(prev && prev.wasPlaying) : !!wasPlaying,
-        ts: Date.now()
-      }));
-    } catch (_) {}
-  };
+  const stickyFill = document.createElement('div');
+  stickyFill.className = 'ss-playline-fill';
 
-  const loadState = () => {
-    const raw = (() => { try { return localStorage.getItem(STORE_KEY); } catch (_) { return null; } })();
-    if (!raw) return null;
-    const st = safeJsonParse(raw);
-    if (!st || !st.src) return null;
-    if (st.ts && Date.now() - st.ts > RESTORE_MAX_AGE_MS) return null;
-    return st;
-  };
+  const stickyKnob = document.createElement('div');
+  stickyKnob.className = 'ss-playline-knob';
 
-  // zapisuj postęp co ~1s
-  let _lastSave = 0;
-  audio.addEventListener('timeupdate', () => {
-    const now = Date.now();
-    if (now - _lastSave > 1000) {
-      _lastSave = now;
-      saveState(!audio.paused, null);
+  stickyLine.appendChild(stickyFill);
+  stickyLine.appendChild(stickyKnob);
+
+  const stickyTime = document.createElement('div');
+  stickyTime.id = 'ss-sticky-time';
+  stickyTime.textContent = '0:00 / 0:00';
+
+  sticky.appendChild(stickyBtn);
+  sticky.appendChild(stickyTitle);
+  sticky.appendChild(stickyLine);
+  sticky.appendChild(stickyTime);
+  document.body.appendChild(sticky);
+
+  function showSticky(titleText) {
+    sticky.style.display = 'flex';
+    stickyTitle.textContent = titleText || '';
+  }
+
+  function hideStickyIfNothing() {
+    if (!currentAudio) {
+      sticky.style.display = 'none';
+      stickyFill.style.width = '0%';
+      stickyKnob.style.left = '0%';
+      stickyTime.textContent = '0:00 / 0:00';
+      stickyTitle.textContent = '';
     }
-  });
+  }
 
-  // UWAGA: na przejściu na inną podstronę przeglądarka potrafi zrobić pause.
-  // Wtedy nie chcemy kasować "wasPlaying".
-  audio.addEventListener('pause', () => {
-    const hidden = document.hidden === true;
-    saveState(false, hidden ? null : false);
-  });
+  function updateSticky() {
+    if (!currentAudio) return;
+    const p = percent(currentAudio);
+    stickyFill.style.width = p + '%';
+    stickyKnob.style.left = p + '%';
+    stickyTime.textContent = `${formatTime(currentAudio.currentTime)} / ${formatTime(currentAudio.duration)}`;
+  }
 
-  audio.addEventListener('play',  () => saveState(true, true));
-  audio.addEventListener('ended', () => saveState(false, false));
-
-  const restoreState = () => {
-    const st = loadState();
-    if (!st) return;
-
-    audio.src = st.src;
-
-    const baseTitle = st.title || '—';
-    const seekTo = Math.max(0, Number(st.t || 0));
-
-    // jeśli grało przed przejściem, traktuj jak "powinno kontynuować"
-    const shouldTryPlay = !!(st.playing || st.wasPlaying);
-
-    // UI startowy zawsze pokazujemy
-    btnPlay.textContent = shouldTryPlay ? '⏸' : '▶';
-    titleElSticky.textContent = `${baseTitle} (od ${fmt(seekTo)})`;
-
-    const doSeekAndMaybePlay = () => {
-      try { audio.currentTime = seekTo; } catch (_) {}
-
-      // jeśli powinno grać — spróbuj, a jak nie, pokaż instrukcję
-      if (shouldTryPlay) {
-        const p = audio.play();
-        if (p && typeof p.catch === 'function') {
-          p.catch(() => {
-            btnPlay.textContent = '▶';
-            titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować od ${fmt(seekTo)})`;
-            saveState(false, true);
-          });
-        }
-      } else {
-        // nawet jeśli nie powinno grać, daj jasny komunikat
-        titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować od ${fmt(seekTo)})`;
-        saveState(false, st.wasPlaying === true);
-      }
-    };
-
-    if (audio.readyState >= 1) doSeekAndMaybePlay();
-    else audio.addEventListener('loadedmetadata', doSeekAndMaybePlay, { once: true });
-  };
-
-  // zapis tuż przed nawigacją (klik w link produktu)
-  const hookNavigationSave = () => {
-    const handler = (e) => {
-      if (!audio.src) return;
-
-      const a = e.target && e.target.closest ? e.target.closest('a') : null;
-      if (!a) return;
-
-      const href = (a.getAttribute('href') || '').trim();
-      if (!href || href === '#' || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
-
-      if (e.button !== 0) return;
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-
-      // klucz: oznacz, że grało przed przejściem
-      saveState(!audio.paused, !audio.paused);
-    };
-
-    document.addEventListener('click', handler, true);
-  };
-
-  /* ================= STICKY ACTIONS ================= */
-
-  btnPlay.addEventListener('click', () => {
-    if (!audio.src) return;
-
-    // usuń ewentualny dopisek instrukcji po kliknięciu
-    const rawTitle = (titleElSticky.textContent || '').replace(/\s*\(kliknij.*?\)\s*$/i, '').trim();
-    if (rawTitle) titleElSticky.textContent = rawTitle;
-
-    if (audio.paused) {
-      const p = audio.play();
-      btnPlay.textContent = '⏸';
-      if (currentBtn) currentBtn.textContent = '⏸';
-      saveState(true, true);
-
-      if (p && typeof p.catch === 'function') {
-        p.catch(() => {
-          btnPlay.textContent = '▶';
-          if (currentBtn) currentBtn.textContent = '▶';
-          titleElSticky.textContent = `${rawTitle || '—'} (kliknij ▶ aby kontynuować)`;
-          saveState(false, true);
-        });
-      }
+  stickyBtn.addEventListener('click', () => {
+    if (!currentAudio) return;
+    if (currentAudio.paused) {
+      currentAudio.play();
+      stickyBtn.textContent = '⏸';
+      if (currentAudio._btn) currentAudio._btn.textContent = '⏸';
     } else {
-      audio.pause();
-      btnPlay.textContent = '▶';
-      resetInlineButtons();
-      saveState(false, true);
+      currentAudio.pause();
+      stickyBtn.textContent = '▶';
+      if (currentAudio._btn) currentAudio._btn.textContent = '▶';
     }
   });
 
-  audio.addEventListener('timeupdate', () => {
-    const d = audio.duration || 0;
-    const c = audio.currentTime || 0;
-    range.value = d ? Math.round((c / d) * 1000) : 0;
-    timeEl.textContent = `${fmt(c)} / ${fmt(d)}`;
+  stickyLine.addEventListener('click', (e) => {
+    if (!currentAudio || !isFinite(currentAudio.duration) || currentAudio.duration <= 0) return;
+    const rect = stickyLine.getBoundingClientRect();
+    const x = clamp(e.clientX - rect.left, 0, rect.width);
+    currentAudio.currentTime = (x / rect.width) * currentAudio.duration;
+    updateSticky();
   });
 
-  audio.addEventListener('ended', () => {
-    btnPlay.textContent = '▶';
-    resetInlineButtons();
-  });
-
-  range.addEventListener('input', () => {
-    const d = audio.duration || 0;
-    if (d) audio.currentTime = (range.value / 1000) * d;
-  });
-
-  /* ================= 1 PRZYCISK NA 1 PRODUKT ================= */
-
-  const cache = new Map(); // title -> url|null
-
-  const getProductBox = (titleEl) => {
-    return (
-      titleEl.closest('figure.product-tile') ||
-      titleEl.closest('figure') ||
-      titleEl.closest('.product-item') ||
-      titleEl.closest('.product-tile') ||
-      titleEl.closest('article') ||
-      titleEl.closest('li') ||
-      titleEl.closest('.product') ||
-      null
-    );
-  };
-
-  const pickMainTitleEl = (box) => {
-    const a = box.querySelector('.product-name a, .product-name-container a');
-    if (a && a.textContent.trim()) return a.closest('.product-name') || a;
-
-    const names = Array.from(
-      box.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name')
-    );
-
-    for (const el of names) {
-      const txt = (el.textContent || '').trim();
-      if (!txt) continue;
-      if (el.getAttribute('aria-hidden') === 'true') continue;
-      const cs = window.getComputedStyle(el);
-      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
-      return el;
-    }
-    return null;
-  };
-
-  const attach = (root = document) => {
-    const candidates = root.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name');
-
-    candidates.forEach((cand) => {
-      const box = getProductBox(cand);
-      if (!box) return;
-
-      if (box.dataset.ssHasPlay === '1') return;
-
-      const titleEl = pickMainTitleEl(box);
-      if (!titleEl) return;
-
-      const title = (titleEl.textContent || '').trim();
-      if (!title) return;
-
-      if (box.querySelector('.ss-playline')) {
-        box.dataset.ssHasPlay = '1';
-        return;
+  // ====== AUDIO CONTROL ======
+  function stopAllExcept(audio) {
+    audios.forEach(a => {
+      if (a !== audio) {
+        a.pause();
+        if (a._btn) a._btn.textContent = '▶';
+        // reset local bar
+        if (a._fill && a._knob) {
+          a._fill.style.width = '0%';
+          a._knob.style.left = '0%';
+        }
       }
+    });
+  }
+
+  function bindCurrentAudio(audio, titleText) {
+    // detach old
+    if (currentAudio) {
+      currentAudio.removeEventListener('timeupdate', updateSticky);
+      currentAudio.removeEventListener('loadedmetadata', updateSticky);
+    }
+
+    currentAudio = audio;
+
+    currentAudio.addEventListener('timeupdate', updateSticky);
+    currentAudio.addEventListener('loadedmetadata', updateSticky);
+
+    showSticky(titleText);
+    updateSticky();
+  }
+
+  // ====== BUILD PER-PRODUCT CONTROLS ======
+  function initTiles(root = document) {
+    $$(SELECTOR_TILE, root).forEach(tile => {
+      if (tile.querySelector('.ss-play-wrap')) return;
+
+      const mp3 = getMp3Url(tile);
+      if (!mp3) return;
+
+      const titleContainer = findTitleContainer(tile);
+      const titleText =
+        (titleContainer && titleContainer.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 160);
+
+      const audio = document.createElement('audio');
+      audio.src = mp3;
+      audio.preload = 'none';
+
+      audios.push(audio);
+
+      // UI: wrap -> [btn][line]
+      const wrap = document.createElement('div');
+      wrap.className = 'ss-play-wrap';
+
+      const btn = document.createElement('button');
+      btn.className = 'ss-play-btn';
+      btn.type = 'button';
+      btn.textContent = '▶';
 
       const line = document.createElement('div');
       line.className = 'ss-playline';
 
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'ss-inline-play';
-      b.textContent = '▶';
+      const fill = document.createElement('div');
+      fill.className = 'ss-playline-fill';
 
-      b.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+      const knob = document.createElement('div');
+      knob.className = 'ss-playline-knob';
 
-        if (currentBtn === b && !audio.paused) {
-          audio.pause();
-          btnPlay.textContent = '▶';
-          b.textContent = '▶';
-          saveState(false, true);
-          return;
-        }
+      line.appendChild(fill);
+      line.appendChild(knob);
 
-        b.textContent = '…';
+      wrap.appendChild(btn);
+      wrap.appendChild(line);
 
-        let url;
-        if (cache.has(title)) {
-          url = cache.get(title);
-        } else {
-          url = await resolveMp3Url(title);
-          cache.set(title, url);
-        }
+      // attach near title
+      titleContainer.appendChild(wrap);
 
-        if (!url) {
-          b.textContent = 'Brak MP3';
-          setTimeout(() => (b.textContent = '▶'), 1200);
-          return;
-        }
+      // store refs
+      audio._btn = btn;
+      audio._fill = fill;
+      audio._knob = knob;
+      audio._title = titleText;
 
-        resetInlineButtons();
-        currentBtn = b;
+      function updateLocal() {
+        const p = percent(audio);
+        fill.style.width = p + '%';
+        knob.style.left = p + '%';
+        // sticky synchronizuje się tylko z currentAudio (updateSticky listener)
+      }
 
-        try { audio.pause(); } catch (_) {}
-        audio.src = url;
-        titleElSticky.textContent = title;
-
-        const p = audio.play();
-        btnPlay.textContent = '⏸';
-        b.textContent = '⏸';
-        saveState(true, true);
-
-        if (p && typeof p.catch === 'function') {
-          p.catch(() => {
-            btnPlay.textContent = '▶';
-            b.textContent = '▶';
-            titleElSticky.textContent = `${title} (kliknij ▶ aby kontynuować)`;
-            saveState(false, true);
-          });
+      audio.addEventListener('timeupdate', updateLocal);
+      audio.addEventListener('loadedmetadata', updateLocal);
+      audio.addEventListener('ended', () => {
+        btn.textContent = '▶';
+        updateLocal();
+        if (currentAudio === audio) {
+          stickyBtn.textContent = '▶';
+          updateSticky();
         }
       });
 
-      line.appendChild(b);
+      line.addEventListener('click', (e) => {
+        if (!isFinite(audio.duration) || audio.duration <= 0) return;
+        const rect = line.getBoundingClientRect();
+        const x = clamp(e.clientX - rect.left, 0, rect.width);
+        audio.currentTime = (x / rect.width) * audio.duration;
+        updateLocal();
+        if (currentAudio === audio) updateSticky();
+      });
 
-      const base = titleEl.matches('a') ? titleEl.parentElement : titleEl;
-      base.insertAdjacentElement('afterend', line);
+      btn.addEventListener('click', () => {
+        // zatrzymaj inne
+        stopAllExcept(audio);
 
-      box.dataset.ssHasPlay = '1';
+        if (audio.paused) {
+          audio.play();
+          btn.textContent = '⏸';
+          stickyBtn.textContent = '⏸';
+          bindCurrentAudio(audio, audio._title || 'Odtwarzanie…');
+        } else {
+          audio.pause();
+          btn.textContent = '▶';
+          if (currentAudio === audio) stickyBtn.textContent = '▶';
+        }
+
+        // jeśli nic nie gra, można schować sticky (opcjonalnie)
+        // tu zostawiamy sticky widoczne, dopóki była interakcja
+        // ale jeśli chcesz auto-hide po pauzie -> odkomentuj:
+        // if (audio.paused && currentAudio === audio) { currentAudio = null; hideStickyIfNothing(); }
+      });
     });
-  };
+  }
 
-  /* ================= START + AJAX ================= */
+  // ====== INIT ON READY ======
+  function boot() {
+    initTiles(document);
 
-  const BOOT = () => {
-    injectCss();
-    attach();
-
-    // obserwuj dynamiczne doładowania (debounce)
-    let t = null;
-    const obs = new MutationObserver(() => {
-      clearTimeout(t);
-      t = setTimeout(() => attach(), 80);
+    // jeśli SkyShop doczytuje produkty dynamicznie
+    const obs = new MutationObserver((muts) => {
+      for (const m of muts) {
+        if (m.addedNodes && m.addedNodes.length) {
+          initTiles(document);
+          break;
+        }
+      }
     });
     obs.observe(document.body, { childList: true, subtree: true });
-
-    hookNavigationSave();
-    restoreState();
-  };
+  }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', BOOT);
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
-    BOOT();
+    boot();
   }
 })();
