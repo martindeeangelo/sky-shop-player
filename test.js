@@ -1,8 +1,12 @@
-/* ===== SKY-SHOP: AUTO FIND MP3 (CASE-SAFE) + STICKY PLAYER + 1x ▶/⏸ PER PRODUKT ===== */
+/* ===== SKY-SHOP: MP3 PER PRODUKT + STICKY + 1x PLAY PER PRODUKT + RESUME MIĘDZY PODSTRONAMI ===== */
 (() => {
   const AUDIO_BASE = 'https://dv202.mysky-shop.pl/upload/dv202/audio/';
   const STYLE_ID = 'ss-player-style';
   const WRAP_ID = 'ss-sticky-player';
+
+  // resume state
+  const STORE_KEY = 'ss_player_state_v1';
+  const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // 30 min
 
   // nie dubluj sticky
   if (document.getElementById(WRAP_ID)) return;
@@ -80,6 +84,10 @@
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
+  };
+
+  const safeJsonParse = (raw) => {
+    try { return JSON.parse(raw); } catch (_) { return null; }
   };
 
   /* ================= CSS ================= */
@@ -174,9 +182,13 @@
   btnPlay.addEventListener('click', () => {
     if (!audio.src) return;
     if (audio.paused) {
-      audio.play();
+      const p = audio.play();
       btnPlay.textContent = '⏸';
       if (currentBtn) currentBtn.textContent = '⏸';
+      if (p && typeof p.catch === 'function') p.catch(() => {
+        btnPlay.textContent = '▶';
+        if (currentBtn) currentBtn.textContent = '▶';
+      });
     } else {
       audio.pause();
       btnPlay.textContent = '▶';
@@ -201,11 +213,96 @@
     if (d) audio.currentTime = (range.value / 1000) * d;
   });
 
+  /* ================= RESUME (localStorage) ================= */
+
+  const saveState = (playing) => {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        src: audio.src || '',
+        title: (titleElSticky.textContent || '').trim(),
+        t: audio.currentTime || 0,
+        playing: !!playing,
+        ts: Date.now()
+      }));
+    } catch (_) {}
+  };
+
+  const loadState = () => {
+    const raw = (() => { try { return localStorage.getItem(STORE_KEY); } catch (_) { return null; } })();
+    if (!raw) return null;
+    const st = safeJsonParse(raw);
+    if (!st || !st.src) return null;
+    if (st.ts && Date.now() - st.ts > RESTORE_MAX_AGE_MS) return null;
+    return st;
+  };
+
+  // zapisuj postęp co ~1s
+  let _lastSave = 0;
+  audio.addEventListener('timeupdate', () => {
+    const now = Date.now();
+    if (now - _lastSave > 1000) {
+      _lastSave = now;
+      saveState(!audio.paused);
+    }
+  });
+
+  audio.addEventListener('play',  () => saveState(true));
+  audio.addEventListener('pause', () => saveState(false));
+  audio.addEventListener('ended', () => saveState(false));
+
+  const restoreState = () => {
+    const st = loadState();
+    if (!st) return;
+
+    audio.src = st.src;
+    titleElSticky.textContent = st.title || '—';
+    btnPlay.textContent = st.playing ? '⏸' : '▶';
+
+    const seekTo = Math.max(0, Number(st.t || 0));
+
+    const doSeekAndMaybePlay = () => {
+      try { audio.currentTime = seekTo; } catch (_) {}
+
+      if (st.playing) {
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {
+          btnPlay.textContent = '▶'; // autoplay zablokowany -> pauza
+        });
+      }
+    };
+
+    if (audio.readyState >= 1) doSeekAndMaybePlay();
+    else audio.addEventListener('loadedmetadata', doSeekAndMaybePlay, { once: true });
+  };
+
+  // zapis tuż przed nawigacją (klik w link produktu / kafelek)
+  const hookNavigationSave = () => {
+    const handler = (e) => {
+      // jeśli nie ma src – nic
+      if (!audio.src) return;
+
+      // klik w link <a> prowadzący gdzieś
+      const a = e.target && e.target.closest ? e.target.closest('a') : null;
+      if (!a) return;
+
+      // pomiń linki typu javascript:, #, mailto:
+      const href = (a.getAttribute('href') || '').trim();
+      if (!href || href === '#' || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+      // tylko lewy klik bez modifierów
+      if (e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      saveState(!audio.paused);
+    };
+
+    document.addEventListener('click', handler, true);
+  };
+
   /* ================= 1 PRZYCISK NA 1 PRODUKT ================= */
 
   const cache = new Map(); // title -> url|null
 
-  // znajdź kontener pojedynczego produktu (różne szablony Sky-Shop)
   const getProductBox = (titleEl) => {
     return (
       titleEl.closest('figure.product-tile') ||
@@ -219,36 +316,35 @@
     );
   };
 
-  // bierz pierwszą “główną” nazwę w produkcie (a nie drugą techniczną)
   const pickMainTitleEl = (box) => {
-    // 1) link tytułu (najczęściej ten właściwy)
+    // 1) link tytułu (zwykle ten właściwy)
     const a = box.querySelector('.product-name a, .product-name-container a');
     if (a && a.textContent.trim()) return a.closest('.product-name') || a;
 
-    // 2) pierwszy widoczny .product-name
-    const names = Array.from(box.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name'));
+    // 2) pierwszy sensowny, widoczny
+    const names = Array.from(
+      box.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name')
+    );
+
     for (const el of names) {
       const txt = (el.textContent || '').trim();
       if (!txt) continue;
-      // jeśli jest ukryty aria-hidden / display none, pomiń
       if (el.getAttribute('aria-hidden') === 'true') continue;
       const cs = window.getComputedStyle(el);
       if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
       return el;
     }
-
     return null;
   };
 
   const attach = (root = document) => {
-    // bierzemy elementy tytułu jako punkty startowe
     const candidates = root.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name');
 
     candidates.forEach((cand) => {
       const box = getProductBox(cand);
       if (!box) return;
 
-      // *** KLUCZ: 1 przycisk na produkt ***
+      // 1 produkt = 1 play
       if (box.dataset.ssHasPlay === '1') return;
 
       const titleEl = pickMainTitleEl(box);
@@ -257,7 +353,7 @@
       const title = (titleEl.textContent || '').trim();
       if (!title) return;
 
-      // jeśli już jest playline w boxie, też nie dodawaj
+      // jeśli już jest playline w boxie
       if (box.querySelector('.ss-playline')) {
         box.dataset.ssHasPlay = '1';
         return;
@@ -280,6 +376,7 @@
           audio.pause();
           btnPlay.textContent = '▶';
           b.textContent = '▶';
+          saveState(false);
           return;
         }
 
@@ -304,17 +401,25 @@
 
         try { audio.pause(); } catch (_) {}
         audio.src = url;
-
         titleElSticky.textContent = title;
-        audio.play();
 
+        const p = audio.play();
         btnPlay.textContent = '⏸';
         b.textContent = '⏸';
+        saveState(true);
+
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            // autoplay zablokowany – ustaw pauzę
+            btnPlay.textContent = '▶';
+            b.textContent = '▶';
+            saveState(false);
+          });
+        }
       });
 
       line.appendChild(b);
 
-      // wstaw pod tytułem
       const base = titleEl.matches('a') ? titleEl.parentElement : titleEl;
       base.insertAdjacentElement('afterend', line);
 
@@ -328,13 +433,19 @@
     injectCss();
     attach();
 
-    // debounce, żeby nie mielić
+    // obserwuj dynamiczne doładowania (debounce)
     let t = null;
     const obs = new MutationObserver(() => {
       clearTimeout(t);
       t = setTimeout(() => attach(), 80);
     });
     obs.observe(document.body, { childList: true, subtree: true });
+
+    // resume po wejściu na kartę produktu / inną podstronę
+    restoreState();
+
+    // zapis przy przejściu linkiem
+    hookNavigationSave();
   };
 
   if (document.readyState === 'loading') {
