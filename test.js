@@ -5,7 +5,7 @@
   const WRAP_ID = 'ss-sticky-player';
 
   // resume state
-  const STORE_KEY = 'ss_player_state_v3';
+  const STORE_KEY = 'ss_player_state_v2';
   const RESTORE_MAX_AGE_MS = 30 * 60 * 1000; // 30 min
 
   if (document.getElementById(WRAP_ID)) return;
@@ -111,7 +111,7 @@
 }
 #${WRAP_ID} #ss-range{flex:1;}
 #${WRAP_ID} #ss-time{
-  width:120px;
+  width:110px;
   text-align:right;
   color:#ccc;
   font-size:12px;
@@ -161,20 +161,51 @@
     document.querySelectorAll('.ss-inline-play').forEach((b) => (b.textContent = '▶'));
   };
 
+  btnPlay.addEventListener('click', () => {
+    if (!audio.src) return;
+    if (audio.paused) {
+      const p = audio.play();
+      btnPlay.textContent = '⏸';
+      if (currentBtn) currentBtn.textContent = '⏸';
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          btnPlay.textContent = '▶';
+          if (currentBtn) currentBtn.textContent = '▶';
+        });
+      }
+    } else {
+      audio.pause();
+      btnPlay.textContent = '▶';
+      resetInlineButtons();
+    }
+  });
+
+  audio.addEventListener('timeupdate', () => {
+    const d = audio.duration || 0;
+    const c = audio.currentTime || 0;
+    range.value = d ? Math.round((c / d) * 1000) : 0;
+    timeEl.textContent = `${fmt(c)} / ${fmt(d)}`;
+  });
+
+  audio.addEventListener('ended', () => {
+    btnPlay.textContent = '▶';
+    resetInlineButtons();
+  });
+
+  range.addEventListener('input', () => {
+    const d = audio.duration || 0;
+    if (d) audio.currentTime = (range.value / 1000) * d;
+  });
+
   /* ================= RESUME (localStorage) ================= */
 
-  // IMPORTANT: zapisujemy też wasPlaying (czy grało zanim user wszedł w produkt)
-  const saveState = (playing, wasPlaying = null) => {
+  const saveState = (playing) => {
     try {
-      const prevRaw = localStorage.getItem(STORE_KEY);
-      const prev = prevRaw ? safeJsonParse(prevRaw) : null;
-
       localStorage.setItem(STORE_KEY, JSON.stringify({
         src: audio.src || '',
         title: (titleElSticky.textContent || '').trim(),
         t: audio.currentTime || 0,
         playing: !!playing,
-        wasPlaying: wasPlaying === null ? !!(prev && prev.wasPlaying) : !!wasPlaying,
         ts: Date.now()
       }));
     } catch (_) {}
@@ -195,53 +226,39 @@
     const now = Date.now();
     if (now - _lastSave > 1000) {
       _lastSave = now;
-      saveState(!audio.paused, null);
+      saveState(!audio.paused);
     }
   });
 
-  // UWAGA: na przejściu na inną podstronę przeglądarka potrafi zrobić pause.
-  // Wtedy nie chcemy kasować "wasPlaying".
-  audio.addEventListener('pause', () => {
-    const hidden = document.hidden === true;
-    saveState(false, hidden ? null : false);
-  });
-
-  audio.addEventListener('play',  () => saveState(true, true));
-  audio.addEventListener('ended', () => saveState(false, false));
+  audio.addEventListener('play',  () => saveState(true));
+  audio.addEventListener('pause', () => saveState(false));
+  audio.addEventListener('ended', () => saveState(false));
 
   const restoreState = () => {
     const st = loadState();
     if (!st) return;
 
     audio.src = st.src;
-
     const baseTitle = st.title || '—';
+    titleElSticky.textContent = baseTitle;
+
+    btnPlay.textContent = st.playing ? '⏸' : '▶';
+
     const seekTo = Math.max(0, Number(st.t || 0));
-
-    // jeśli grało przed przejściem, traktuj jak "powinno kontynuować"
-    const shouldTryPlay = !!(st.playing || st.wasPlaying);
-
-    // UI startowy zawsze pokazujemy
-    btnPlay.textContent = shouldTryPlay ? '⏸' : '▶';
-    titleElSticky.textContent = `${baseTitle} (od ${fmt(seekTo)})`;
 
     const doSeekAndMaybePlay = () => {
       try { audio.currentTime = seekTo; } catch (_) {}
 
-      // jeśli powinno grać — spróbuj, a jak nie, pokaż instrukcję
-      if (shouldTryPlay) {
+      if (st.playing) {
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
           p.catch(() => {
+            // autoplay zablokowany – powiedz userowi co zrobić
             btnPlay.textContent = '▶';
-            titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować od ${fmt(seekTo)})`;
-            saveState(false, true);
+            titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować)`;
+            saveState(false);
           });
         }
-      } else {
-        // nawet jeśli nie powinno grać, daj jasny komunikat
-        titleElSticky.textContent = `${baseTitle} (kliknij ▶ aby kontynuować od ${fmt(seekTo)})`;
-        saveState(false, st.wasPlaying === true);
       }
     };
 
@@ -263,60 +280,11 @@
       if (e.button !== 0) return;
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
 
-      // klucz: oznacz, że grało przed przejściem
-      saveState(!audio.paused, !audio.paused);
+      saveState(!audio.paused);
     };
 
     document.addEventListener('click', handler, true);
   };
-
-  /* ================= STICKY ACTIONS ================= */
-
-  btnPlay.addEventListener('click', () => {
-    if (!audio.src) return;
-
-    // usuń ewentualny dopisek instrukcji po kliknięciu
-    const rawTitle = (titleElSticky.textContent || '').replace(/\s*\(kliknij.*?\)\s*$/i, '').trim();
-    if (rawTitle) titleElSticky.textContent = rawTitle;
-
-    if (audio.paused) {
-      const p = audio.play();
-      btnPlay.textContent = '⏸';
-      if (currentBtn) currentBtn.textContent = '⏸';
-      saveState(true, true);
-
-      if (p && typeof p.catch === 'function') {
-        p.catch(() => {
-          btnPlay.textContent = '▶';
-          if (currentBtn) currentBtn.textContent = '▶';
-          titleElSticky.textContent = `${rawTitle || '—'} (kliknij ▶ aby kontynuować)`;
-          saveState(false, true);
-        });
-      }
-    } else {
-      audio.pause();
-      btnPlay.textContent = '▶';
-      resetInlineButtons();
-      saveState(false, true);
-    }
-  });
-
-  audio.addEventListener('timeupdate', () => {
-    const d = audio.duration || 0;
-    const c = audio.currentTime || 0;
-    range.value = d ? Math.round((c / d) * 1000) : 0;
-    timeEl.textContent = `${fmt(c)} / ${fmt(d)}`;
-  });
-
-  audio.addEventListener('ended', () => {
-    btnPlay.textContent = '▶';
-    resetInlineButtons();
-  });
-
-  range.addEventListener('input', () => {
-    const d = audio.duration || 0;
-    if (d) audio.currentTime = (range.value / 1000) * d;
-  });
 
   /* ================= 1 PRZYCISK NA 1 PRODUKT ================= */
 
@@ -390,7 +358,7 @@
           audio.pause();
           btnPlay.textContent = '▶';
           b.textContent = '▶';
-          saveState(false, true);
+          saveState(false);
           return;
         }
 
@@ -420,14 +388,14 @@
         const p = audio.play();
         btnPlay.textContent = '⏸';
         b.textContent = '⏸';
-        saveState(true, true);
+        saveState(true);
 
         if (p && typeof p.catch === 'function') {
           p.catch(() => {
             btnPlay.textContent = '▶';
             b.textContent = '▶';
             titleElSticky.textContent = `${title} (kliknij ▶ aby kontynuować)`;
-            saveState(false, true);
+            saveState(false);
           });
         }
       });
