@@ -275,10 +275,3 @@
   cursor:pointer;
 }
 </style>
-
-
-
-
-[(() => {
-  console.log('test js loaded');
-})();]
