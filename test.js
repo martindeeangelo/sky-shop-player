@@ -1,6 +1,4 @@
-<script>
 document.addEventListener('DOMContentLoaded', () => {
-  alert('JS DZIAŁA (inline)'); 
-  console.log('INLINE OK');
+  alert('JS DZIAŁA (external)');
+  console.log('✅ test.js LOADED');
 });
-</script>
