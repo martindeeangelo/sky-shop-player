@@ -1,16 +1,17 @@
-/* ===== AUTO FIND MP3 (CASE-SAFE) + STICKY PLAYER + ▶/⏸ POD .product-name ===== */
+/* ===== SKY-SHOP: AUTO FIND MP3 (CASE-SAFE) + STICKY PLAYER + 1x ▶/⏸ PER PRODUKT ===== */
 (() => {
   const AUDIO_BASE = 'https://dv202.mysky-shop.pl/upload/dv202/audio/';
   const STYLE_ID = 'ss-player-style';
   const WRAP_ID = 'ss-sticky-player';
 
+  // nie dubluj sticky
   if (document.getElementById(WRAP_ID)) return;
 
   /* ================= HELPERS ================= */
 
   const deDia = (s) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-  // FINALNE slugowanie – obsługuje &, nawiasy, _www, końcowe -.mp3
+  // slugowanie: &, nawiasy, apostrofy, _www, końcowe -.mp3
   const slugFromTitle = (title) => {
     let s = deDia(title);
 
@@ -35,7 +36,7 @@
     return s;
   };
 
-  // sprawdzanie istnienia pliku przez Audio (bez HEAD)
+  // sprawdzanie istnienia mp3 przez Audio (bez HEAD)
   const audioUrlExists = (url, timeoutMs = 2500) =>
     new Promise((resolve) => {
       const a = new Audio();
@@ -51,20 +52,9 @@
 
       const t = setTimeout(() => finish(false), timeoutMs);
 
-      a.addEventListener('loadedmetadata', () => {
-        clearTimeout(t);
-        finish(true);
-      }, { once: true });
-
-      a.addEventListener('canplay', () => {
-        clearTimeout(t);
-        finish(true);
-      }, { once: true });
-
-      a.addEventListener('error', () => {
-        clearTimeout(t);
-        finish(false);
-      }, { once: true });
+      a.addEventListener('loadedmetadata', () => { clearTimeout(t); finish(true); }, { once: true });
+      a.addEventListener('canplay', () => { clearTimeout(t); finish(true); }, { once: true });
+      a.addEventListener('error', () => { clearTimeout(t); finish(false); }, { once: true });
 
       a.preload = 'metadata';
       a.src = url;
@@ -91,6 +81,8 @@
     const s = Math.floor(sec % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
+
+  /* ================= CSS ================= */
 
   const injectCss = () => {
     if (document.getElementById(STYLE_ID)) return;
@@ -143,7 +135,8 @@
   background:#000; color:#fff;
   font-size:12px;
   cursor:pointer;
-}`;
+}
+`;
     document.head.appendChild(st);
   };
 
@@ -170,7 +163,7 @@
   document.body.appendChild(wrap);
 
   const btnPlay = wrap.querySelector('#ss-play');
-  const titleEl = wrap.querySelector('#ss-title');
+  const titleElSticky = wrap.querySelector('#ss-title');
   const range = wrap.querySelector('#ss-range');
   const timeEl = wrap.querySelector('#ss-time');
 
@@ -208,36 +201,67 @@
     if (d) audio.currentTime = (range.value / 1000) * d;
   });
 
-  /* ================= BUTTONS POD NAZWĄ (różne selektory Sky-Shop) ================= */
+  /* ================= 1 PRZYCISK NA 1 PRODUKT ================= */
 
   const cache = new Map(); // title -> url|null
 
-  const getTitleFromEl = (el) => {
-    // jeśli to link <a> to bierz jego tekst, jeśli wrapper to spróbuj znaleźć <a>
-    const a = el.matches('a') ? el : el.querySelector?.('a');
-    const txt = (a?.textContent || el.textContent || '').trim();
-    return txt;
+  // znajdź kontener pojedynczego produktu (różne szablony Sky-Shop)
+  const getProductBox = (titleEl) => {
+    return (
+      titleEl.closest('figure.product-tile') ||
+      titleEl.closest('figure') ||
+      titleEl.closest('.product-item') ||
+      titleEl.closest('.product-tile') ||
+      titleEl.closest('article') ||
+      titleEl.closest('li') ||
+      titleEl.closest('.product') ||
+      null
+    );
+  };
+
+  // bierz pierwszą “główną” nazwę w produkcie (a nie drugą techniczną)
+  const pickMainTitleEl = (box) => {
+    // 1) link tytułu (najczęściej ten właściwy)
+    const a = box.querySelector('.product-name a, .product-name-container a');
+    if (a && a.textContent.trim()) return a.closest('.product-name') || a;
+
+    // 2) pierwszy widoczny .product-name
+    const names = Array.from(box.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name'));
+    for (const el of names) {
+      const txt = (el.textContent || '').trim();
+      if (!txt) continue;
+      // jeśli jest ukryty aria-hidden / display none, pomiń
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+      const cs = window.getComputedStyle(el);
+      if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+      return el;
+    }
+
+    return null;
   };
 
   const attach = (root = document) => {
-    const selectors = [
-      '.product-name',
-      '.product-name a',
-      '.product-name-container',
-      '.product-name-container a',
-      'h2.product-name',
-      'h3.product-name',
-    ].join(',');
+    // bierzemy elementy tytułu jako punkty startowe
+    const candidates = root.querySelectorAll('.product-name, .product-name-container, h2.product-name, h3.product-name');
 
-    root.querySelectorAll(selectors).forEach((el) => {
-      // oznaczamy tylko elementy bazowe (nie same linki), żeby nie robić duplikatów
-      const anchor = el.matches('a') ? el : el.querySelector?.('a');
-      const base = el.matches('.product-name, .product-name-container, h2.product-name, h3.product-name') ? el : (anchor?.closest('.product-name, .product-name-container') || el);
+    candidates.forEach((cand) => {
+      const box = getProductBox(cand);
+      if (!box) return;
 
-      if (!base || base.dataset.ssBtn === '1') return;
+      // *** KLUCZ: 1 przycisk na produkt ***
+      if (box.dataset.ssHasPlay === '1') return;
 
-      const title = getTitleFromEl(base);
+      const titleEl = pickMainTitleEl(box);
+      if (!titleEl) return;
+
+      const title = (titleEl.textContent || '').trim();
       if (!title) return;
+
+      // jeśli już jest playline w boxie, też nie dodawaj
+      if (box.querySelector('.ss-playline')) {
+        box.dataset.ssHasPlay = '1';
+        return;
+      }
 
       const line = document.createElement('div');
       line.className = 'ss-playline';
@@ -251,7 +275,7 @@
         e.preventDefault();
         e.stopPropagation();
 
-        // pauza
+        // pauza, jeśli to ten sam
         if (currentBtn === b && !audio.paused) {
           audio.pause();
           btnPlay.textContent = '▶';
@@ -278,20 +302,23 @@
         resetInlineButtons();
         currentBtn = b;
 
-        // jeśli grało coś innego – stop
         try { audio.pause(); } catch (_) {}
-
         audio.src = url;
-        titleEl.textContent = title;
 
+        titleElSticky.textContent = title;
         audio.play();
+
         btnPlay.textContent = '⏸';
         b.textContent = '⏸';
       });
 
       line.appendChild(b);
+
+      // wstaw pod tytułem
+      const base = titleEl.matches('a') ? titleEl.parentElement : titleEl;
       base.insertAdjacentElement('afterend', line);
-      base.dataset.ssBtn = '1';
+
+      box.dataset.ssHasPlay = '1';
     });
   };
 
@@ -301,7 +328,7 @@
     injectCss();
     attach();
 
-    // lekkie odciążenie MutationObserver (debounce)
+    // debounce, żeby nie mielić
     let t = null;
     const obs = new MutationObserver(() => {
       clearTimeout(t);
