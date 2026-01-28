@@ -1,0 +1,10 @@
+{
+  "name": "sky-shop-player",
+  "private": true,
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --format=iife --target=es2018 --outfile=dist/test.js"
+  }
+}
